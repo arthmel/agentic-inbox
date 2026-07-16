@@ -1,0 +1,95 @@
+diff --git a/workers/app.ts b/workers/app.ts
+index 607525f..5242d93 100644
+--- a/workers/app.ts
++++ b/workers/app.ts
+@@ -111,7 +111,7 @@ app.all("*", (c) => {
+ export default {
+ 	fetch: app.fetch,
+ 	async email(
+-		event: { raw: ReadableStream; rawSize: number },
++		event: ForwardableEmailMessage,
+ 		env: Env,
+ 		ctx: ExecutionContext,
+ 	) {
+diff --git a/workers/index.ts b/workers/index.ts
+index fd3359c..6f030f4 100644
+--- a/workers/index.ts
++++ b/workers/index.ts
+@@ -345,7 +345,7 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
+ 	return result;
+ }
+ 
+-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
++async function receiveEmail(event: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
+ 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
+ 	const parsedEmail = await new PostalMime().parse(rawEmail);
+ 
+@@ -364,7 +364,9 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
+ 	if (!mailboxId) throw new Error("received email with no valid recipient address");
+ 
+ 	const messageId = crypto.randomUUID();
+-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
++	const mailboxSettingsObj = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
++	if (!mailboxSettingsObj) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
++	const mailboxSettings = await mailboxSettingsObj.json<{ forwarding?: { enabled?: boolean; email?: string } }>();
+ 
+ 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+ 
+@@ -402,6 +404,15 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
+ 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
+ 	}, attachmentData);
+ 
++	const forwardingEmail = mailboxSettings.forwarding?.enabled && typeof mailboxSettings.forwarding.email === "string"
++		? mailboxSettings.forwarding.email.trim().toLowerCase()
++		: "";
++	if (forwardingEmail) {
++		ctx.waitUntil(event.forward(forwardingEmail).catch((e) => {
++			console.error(`Forwarding ${mailboxId} to ${forwardingEmail} failed:`, (e as Error).message);
++		}));
++	}
++
+ 	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
+ 	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
+ 		method: "POST", headers: { "Content-Type": "application/json" },
+diff --git a/wrangler.jsonc b/wrangler.jsonc
+index 53a65cd..79df2ea 100644
+--- a/wrangler.jsonc
++++ b/wrangler.jsonc
+@@ -1,8 +1,14 @@
+ {
+ 	"$schema": "node_modules/wrangler/config-schema.json",
+-	"name": "agentic-inbox",
++	"name": "sasha-agentic-inbox",
+ 	"compatibility_date": "2025-11-28",
+ 	"main": "./workers/app.ts",
++	"routes": [
++		{
++			"pattern": "sasha-mail.meltser.biz",
++			"custom_domain": true
++		}
++	],
+ 	"observability": {
+ 		"enabled": true
+ 	},
+@@ -13,8 +19,8 @@
+ 		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
+ 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
+ 		// The worker now fails closed outside local development if Access is not configured.
+-		"DOMAINS": "example.com",
+-		"EMAIL_ADDRESSES": []
++		"DOMAINS": "meltser.biz,sepnets.io,aimedia.co.il,no-signal.co",
++		"EMAIL_ADDRESSES": ["sasha@meltser.biz", "sasha@sepnets.io", "sasha@aimedia.co.il", "Lera@no-signal.co", "sasha@no-signal.co"]
+ 	},
+ 	"send_email": [
+ 		{
+@@ -25,8 +31,8 @@
+ 	"r2_buckets": [
+ 		{
+ 			"binding": "BUCKET",
+-			"bucket_name": "agentic-inbox",
+-			"preview_bucket_name": "agentic-inbox"
++			"bucket_name": "agentic-inbox-sasha",
++			"preview_bucket_name": "agentic-inbox-sasha"
+ 		}
+ 	],
+ 	"ai": {

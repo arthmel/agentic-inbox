@@ -108,7 +108,7 @@ app.post("/api/v1/mailboxes", async (c) => {
 	}
 	const key = `mailboxes/${email}.json`;
 	if (await c.env.BUCKET.head(key)) return c.json({ error: "Mailbox already exists" }, 409);
-	const defaultSettings = { fromName: name, forwarding: { enabled: false, email: "" }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
+	const defaultSettings = { fromName: name, forwarding: { enabled: false, emails: [] }, signature: { enabled: false, text: "" }, autoReply: { enabled: false, subject: "", message: "" } };
 	const finalSettings = { ...defaultSettings, ...settings };
 	await c.env.BUCKET.put(key, JSON.stringify(finalSettings));
 	const stub = c.env.MAILBOX.get(c.env.MAILBOX.idFromName(email));
@@ -345,7 +345,7 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
 	return result;
 }
 
-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
+async function receiveEmail(event: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
 	const parsedEmail = await new PostalMime().parse(rawEmail);
 
@@ -359,12 +359,32 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 	let mailboxId: string | undefined;
 	if (allowedAddresses.length > 0) {
 		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
+		if (!mailboxId) {
+			const catchAllMailboxes = new Map([
+				["meltser.biz", "info@meltser.biz"],
+				["sepnets.io", "info@sepnets.io"],
+				["aimedia.co.il", "info@aimedia.co.il"],
+			]);
+			for (const recipient of allRecipients) {
+				const domain = recipient.split("@").pop();
+				const catchAllMailbox = domain ? catchAllMailboxes.get(domain) : undefined;
+				if (catchAllMailbox && allowedAddresses.includes(catchAllMailbox)) {
+					mailboxId = catchAllMailbox;
+					break;
+				}
+			}
+			if (!mailboxId) {
+				console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`);
+				return;
+			}
+		}
 	} else { mailboxId = allRecipients[0]; }
 	if (!mailboxId) throw new Error("received email with no valid recipient address");
 
 	const messageId = crypto.randomUUID();
-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
+	const mailboxSettingsObj = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
+	if (!mailboxSettingsObj) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
+	const mailboxSettings = await mailboxSettingsObj.json<{ forwarding?: { enabled?: boolean; emails?: string[] } }>();
 
 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
 
@@ -401,6 +421,17 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
 		in_reply_to: inReplyTo, email_references: emailReferences.length > 0 ? JSON.stringify(emailReferences) : null,
 		thread_id: threadId, message_id: originalMessageId, raw_headers: JSON.stringify(parsedEmail.headers),
 	}, attachmentData);
+
+	const forwardingEmails = mailboxSettings.forwarding?.enabled && Array.isArray(mailboxSettings.forwarding.emails)
+		? mailboxSettings.forwarding.emails.map((e: string) => e.trim().toLowerCase()).filter(Boolean)
+		: [];
+	console.log(`Forwarding ${mailboxId}: enabled=${mailboxSettings.forwarding?.enabled}, emails=`, forwardingEmails);
+	for (const forwardingEmail of forwardingEmails) {
+		console.log(`Forwarding ${mailboxId} to ${forwardingEmail}`);
+		ctx.waitUntil(event.forward(forwardingEmail).catch((e) => {
+			console.error(`Forwarding ${mailboxId} to ${forwardingEmail} failed:`, (e as Error).message);
+		}));
+	}
 
 	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
 	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {

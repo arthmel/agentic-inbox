@@ -1,0 +1,111 @@
+diff --git a/workers/app.ts b/workers/app.ts
+index 607525f..6501252 100644
+--- a/workers/app.ts
++++ b/workers/app.ts
+@@ -111,7 +111,7 @@ app.all("*", (c) => {
+ export default {
+ 	fetch: app.fetch,
+ 	async email(
+-		event: { raw: ReadableStream; rawSize: number },
++		event: { raw: ReadableStream; rawSize: number; forward?: (rcptTo: string, headers?: Headers) => Promise<unknown> },
+ 		env: Env,
+ 		ctx: ExecutionContext,
+ 	) {
+diff --git a/workers/index.ts b/workers/index.ts
+index fd3359c..d26119d 100644
+--- a/workers/index.ts
++++ b/workers/index.ts
+@@ -345,7 +345,7 @@ async function streamToArrayBuffer(stream: ReadableStream, streamSize: number) {
+ 	return result;
+ }
+ 
+-async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env: Env, ctx: ExecutionContext) {
++async function receiveEmail(event: { raw: ReadableStream; rawSize: number; forward?: (rcptTo: string, headers?: Headers) => Promise<unknown> }, env: Env, ctx: ExecutionContext) {
+ 	const rawEmail = await streamToArrayBuffer(event.raw, event.rawSize);
+ 	const parsedEmail = await new PostalMime().parse(rawEmail);
+ 
+@@ -359,12 +359,24 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
+ 	let mailboxId: string | undefined;
+ 	if (allowedAddresses.length > 0) {
+ 		mailboxId = allRecipients.find((addr) => allowedAddresses.includes(addr));
+-		if (!mailboxId) { console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`); return; }
++		if (!mailboxId) {
++			const aimediaCatchAllRecipient = allRecipients.find((addr) => addr.endsWith("@aimedia.co.il"));
++			if (aimediaCatchAllRecipient && allowedAddresses.includes("info@aimedia.co.il")) {
++				mailboxId = "info@aimedia.co.il";
++			} else {
++				console.log(`Ignoring email: no recipient matches EMAIL_ADDRESSES.`);
++				return;
++			}
++		}
+ 	} else { mailboxId = allRecipients[0]; }
+ 	if (!mailboxId) throw new Error("received email with no valid recipient address");
+ 
+ 	const messageId = crypto.randomUUID();
+-	if (!(await env.BUCKET.head(`mailboxes/${mailboxId}.json`))) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
++	const mailboxSettingsObject = await env.BUCKET.get(`mailboxes/${mailboxId}.json`);
++	if (!mailboxSettingsObject) { console.log(`Ignoring email for ${mailboxId}: mailbox does not exist`); return; }
++	const mailboxSettings: { forwarding?: { enabled?: boolean; email?: string } } = await mailboxSettingsObject
++		.json<{ forwarding?: { enabled?: boolean; email?: string } }>()
++		.catch(() => ({}));
+ 
+ 	const stub = env.MAILBOX.get(env.MAILBOX.idFromName(mailboxId));
+ 
+@@ -407,6 +419,15 @@ async function receiveEmail(event: { raw: ReadableStream; rawSize: number }, env
+ 		method: "POST", headers: { "Content-Type": "application/json" },
+ 		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
+ 	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
++
++	const forwardingEmail = mailboxSettings.forwarding?.email?.trim();
++	if (mailboxSettings.forwarding?.enabled && forwardingEmail) {
++		if (event.forward) {
++			ctx.waitUntil(event.forward(forwardingEmail).catch((e) => console.error("Email forwarding failed:", (e as Error).message)));
++		} else {
++			console.error("Email forwarding requested, but event.forward is unavailable");
++		}
++	}
+ }
+ 
+ export { app, receiveEmail };
+diff --git a/wrangler.jsonc b/wrangler.jsonc
+index 53a65cd..eb6a581 100644
+--- a/wrangler.jsonc
++++ b/wrangler.jsonc
+@@ -1,8 +1,14 @@
+ {
+ 	"$schema": "node_modules/wrangler/config-schema.json",
+-	"name": "agentic-inbox",
++	"name": "michael-agentic-inbox",
+ 	"compatibility_date": "2025-11-28",
+ 	"main": "./workers/app.ts",
++	"routes": [
++		{
++			"pattern": "michael-mail.meltser.biz",
++			"custom_domain": true
++		}
++	],
+ 	"observability": {
+ 		"enabled": true
+ 	},
+@@ -13,8 +19,8 @@
+ 		// Production deploys must also define POLICY_AUD and TEAM_DOMAIN.
+ 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
+ 		// The worker now fails closed outside local development if Access is not configured.
+-		"DOMAINS": "example.com",
+-		"EMAIL_ADDRESSES": []
++		"DOMAINS": "sepnets.io",
++		"EMAIL_ADDRESSES": ["michael@sepnets.io"]
+ 	},
+ 	"send_email": [
+ 		{
+@@ -25,8 +31,8 @@
+ 	"r2_buckets": [
+ 		{
+ 			"binding": "BUCKET",
+-			"bucket_name": "agentic-inbox",
+-			"preview_bucket_name": "agentic-inbox"
++			"bucket_name": "agentic-inbox-michael",
++			"preview_bucket_name": "agentic-inbox-michael"
+ 		}
+ 	],
+ 	"ai": {
