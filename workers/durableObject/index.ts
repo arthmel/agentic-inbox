@@ -10,6 +10,7 @@ import * as schema from "../db/schema";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
 import { applyMigrations, mailboxMigrations } from "./migrations";
+import type { RetentionRow } from "../lib/retention";
 
 /**
  * SQL expression to normalize email subjects by stripping common
@@ -558,6 +559,45 @@ export class MailboxDO extends DurableObject<Env> {
 			.run();
 
 		return emailAttachments;
+	}
+
+	// ── Retention purge (#345) ─────────────────────────────────
+
+	/** Minimal per-message rows for thread grouping (all folders). */
+	async listRetentionRows(): Promise<RetentionRow[]> {
+		return [
+			...this.ctx.storage.sql.exec(
+				`SELECT e.id, e.date, e.subject, e.folder_id AS folder, e.in_reply_to,
+					e.email_references, e.message_id, e.thread_id,
+					(SELECT COUNT(*) FROM attachments a WHERE a.email_id = e.id) AS attachment_count
+				FROM emails e`,
+			),
+		] as unknown as RetentionRow[];
+	}
+
+	/** R2 keys of the attachment blobs belonging to the given emails (same scheme as storeAttachments). */
+	async attachmentKeysFor(emailIds: string[]): Promise<string[]> {
+		const keys: string[] = [];
+		for (const emailId of emailIds) {
+			const rows = [
+				...this.ctx.storage.sql.exec(
+					`SELECT id, filename FROM attachments WHERE email_id = ?`,
+					emailId,
+				),
+			] as unknown as { id: string; filename: string }[];
+			for (const r of rows) keys.push(`attachments/${emailId}/${r.id}/${r.filename}`);
+		}
+		return keys;
+	}
+
+	/** Delete emails + their attachment rows in one transaction. Missing ids are skipped (idempotent). */
+	async purgeEmails(emailIds: string[]): Promise<void> {
+		this.ctx.storage.transactionSync(() => {
+			for (const id of emailIds) {
+				this.ctx.storage.sql.exec(`DELETE FROM attachments WHERE email_id = ?`, id);
+				this.ctx.storage.sql.exec(`DELETE FROM emails WHERE id = ?`, id);
+			}
+		});
 	}
 
 	async getAttachment(id: string) {

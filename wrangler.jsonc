@@ -20,7 +20,14 @@
 		// TEAM_DOMAIN may be the base Access URL or the full /cdn-cgi/access/certs URL.
 		// The worker now fails closed outside local development if Access is not configured.
 		"DOMAINS": "meltser.biz,sepnets.io,aimedia.co.il",
-		"EMAIL_ADDRESSES": ["info@meltser.biz", "info@sepnets.io", "info@aimedia.co.il"]
+		"EMAIL_ADDRESSES": ["info@meltser.biz", "info@sepnets.io", "info@aimedia.co.il"],
+		// 24-month retention purge (#345). Only RETENTION_DRY_RUN === "false" deletes; anything else is a dry run.
+		"RETENTION_DRY_RUN": "true",
+		"RETENTION_MAILBOXES": ["info@sepnets.io"],
+		"RETENTION_DAYS": "730"
+	},
+	"triggers": {
+		"crons": ["17 3 * * *"]
 	},
 	"send_email": [
 		{
