@@ -73,8 +73,7 @@ describe("threading", () => {
 		const threads = groupThreads(rows);
 		assert.equal(threads.length, 2);
 		const grouped = threads.find((t) => t.messageCount === 2);
-		assert.ok(grouped, "root + child form one thread");
-		assert.deepEqual([...grouped.ids].sort(), ["child", "root"]);
+		assert.deepEqual([...(grouped?.ids ?? [])].sort(), ["child", "root"], "root + child form one thread");
 	});
 
 	test("groups via email_references (JSON array)", () => {
