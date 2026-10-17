@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
 import { app as apiApp, receiveEmail } from "./index";
+import { runRetentionPurge } from "./lib/retention-job";
 import { EmailMCP } from "./mcp";
 import type { Env } from "./types";
 
@@ -123,5 +124,9 @@ export default {
 			// Swallowing the error would silently drop the email.
 			throw e;
 		}
+	},
+	// Daily 24-month retention purge (#345). Dry run unless RETENTION_DRY_RUN === "false".
+	async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+		await runRetentionPurge(env);
 	},
 };

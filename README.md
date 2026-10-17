@@ -68,6 +68,17 @@ npm run dev
 npm run deploy
 ```
 
+### Retention purge
+
+A daily Cron Trigger (`triggers.crons` in `wrangler.jsonc`, `17 3 * * *` UTC) deletes whole threads whose newest message (any folder, including sent replies) is older than `RETENTION_DAYS`. Threads are grouped by `message_id`, `in_reply_to`, `email_references` and `thread_id`. Threads with an unparsable date are never purged.
+
+- `RETENTION_MAILBOXES`: mailboxes in scope (currently `["info@sepnets.io"]`). Other mailboxes are untouched.
+- `RETENTION_DAYS`: age in days (`"730"` = 24 months).
+- `RETENTION_DRY_RUN`: committed as `"true"`. A dry run deletes nothing. Only the exact string `"false"` enables deletion.
+- Every run writes a report (both modes) to R2 at `retention-reports/<mailbox>/<YYYY-MM-DD>.json`: counts, cutoff, oldest kept date, and up to 20 sample threads (date, message count, subject). No sender addresses or bodies.
+
+To go live: review a dry-run report, set `RETENTION_DRY_RUN` to `"false"` in `wrangler.jsonc`, and deploy. To test locally: `wrangler dev --test-scheduled` and call `/__scheduled`.
+
 ## Prerequisites
 
 - Cloudflare account with a domain
