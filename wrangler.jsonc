@@ -22,7 +22,7 @@
 		"DOMAINS": "meltser.biz,sepnets.io,aimedia.co.il",
 		"EMAIL_ADDRESSES": ["info@meltser.biz", "info@sepnets.io", "info@aimedia.co.il"],
 		// 24-month retention purge (#345). Only RETENTION_DRY_RUN === "false" deletes; anything else is a dry run.
-		"RETENTION_DRY_RUN": "true",
+		"RETENTION_DRY_RUN": "false",
 		"RETENTION_MAILBOXES": ["info@sepnets.io"],
 		"RETENTION_DAYS": "730"
 	},
