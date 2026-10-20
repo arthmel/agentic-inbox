@@ -33,6 +33,7 @@ import {
 	MAX_OUTBOUND_HTML_BYTES,
 } from "./outbound-cleanup";
 import { sendEmail } from "../email-sender";
+import { storeAttachments, sanitizeAttachmentFilename, type StoredAttachment } from "./attachments";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
 
@@ -81,6 +82,48 @@ function outboundSizeError(html: string): string | null {
 	const bytes = new TextEncoder().encode(html).length;
 	if (bytes <= MAX_OUTBOUND_HTML_BYTES) return null;
 	return `Email body is ${(bytes / 1_000_000).toFixed(2)} MB; the limit is 3.5 MB (Cloudflare caps a whole message at 5 MiB). Shorten it or split it.`;
+}
+
+/** Max recipients across to, cc and bcc for MCP send_email. */
+const MAX_RECIPIENTS = 50;
+const ATTACHMENT_BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+const CONTENT_TYPE_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/i;
+
+type SendAttachmentInput = { filename: string; contentType: string; contentBase64: string };
+type PreparedAttachment = { filename: string; contentType: string; content: string; size: number };
+
+/**
+ * Validate attachments (base64, content type) and compute decoded sizes.
+ * Filenames are sanitized here, so the send and the R2 archive use the same name.
+ */
+function prepareAttachments(
+	attachments: SendAttachmentInput[] | undefined,
+): { error: string } | { items: PreparedAttachment[] } {
+	const items: PreparedAttachment[] = [];
+	for (const att of attachments ?? []) {
+		const filename = sanitizeAttachmentFilename(att.filename);
+		const content = att.contentBase64.replace(/\s+/g, "");
+		const padding = content.endsWith("==") ? 2 : content.endsWith("=") ? 1 : 0;
+		const size = (content.length / 4) * 3 - padding;
+		if (!ATTACHMENT_BASE64_RE.test(content) || content.length % 4 !== 0 || size <= 0) {
+			return { error: `Attachment "${filename}" is not valid base64.` };
+		}
+		if (!CONTENT_TYPE_RE.test(att.contentType)) {
+			return { error: `Attachment "${filename}" has an invalid content type.` };
+		}
+		items.push({ filename, contentType: att.contentType, content, size });
+	}
+	return { items };
+}
+
+/**
+ * Total size cap: html + text + decoded attachments. Cloudflare caps the whole
+ * ENCODED message at 5 MiB and base64 adds x4/3, so 3.5 MB decoded is the safe
+ * budget. This is stricter than the issue's "5 MiB decoded", on purpose.
+ */
+function outboundTotalSizeError(totalBytes: number): string | null {
+	if (totalBytes <= MAX_OUTBOUND_HTML_BYTES) return null;
+	return `Email is ${(totalBytes / 1_000_000).toFixed(2)} MB including attachments; the limit is 3.5 MB (Cloudflare caps a whole message at 5 MiB incl. encoding). Send fewer or smaller files.`;
 }
 
 // ── list_mailboxes ─────────────────────────────────────────────────
@@ -526,9 +569,13 @@ export async function toolSendEmail(
 		to: string;
 		subject: string;
 		bodyHtml: string;
+		text?: string;
+		cc?: string[];
+		bcc?: string[];
+		attachments?: SendAttachmentInput[];
 	},
 ): Promise<
-	| { status: "sent"; messageId: string; message: string }
+	| { status: "sent"; messageId: string; message: string; warning?: string }
 	| { error: string }
 > {
 	const stub = getMailboxStub(env, mailboxId);
@@ -540,6 +587,24 @@ export async function toolSendEmail(
 	// Size cap and rate limit come after validation: a rejected body must not burn quota.
 	const sizeError = outboundSizeError(sanitizedBody);
 	if (sizeError) return { error: sizeError };
+
+	const text = params.text !== undefined ? cleanOutboundBody(params.text).body : undefined;
+	const cc = params.cc ?? [];
+	const bcc = params.bcc ?? [];
+	const recipientCount = 1 + cc.length + bcc.length;
+	if (recipientCount > MAX_RECIPIENTS) {
+		return { error: `Too many recipients: ${recipientCount} (max ${MAX_RECIPIENTS} across to, cc and bcc).` };
+	}
+
+	const prepared = prepareAttachments(params.attachments);
+	if ("error" in prepared) return prepared;
+	const attachmentBytes = prepared.items.reduce((sum, a) => sum + a.size, 0);
+	const textBytes = new TextEncoder().encode(text ?? "").length;
+	const totalError = outboundTotalSizeError(
+		new TextEncoder().encode(sanitizedBody).length + textBytes + attachmentBytes,
+	);
+	if (totalError) return { error: totalError };
+
 	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
 	if (rateLimitError) {
 		return { error: rateLimitError };
@@ -549,16 +614,39 @@ export async function toolSendEmail(
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
+	const outboundAttachments = prepared.items.map((a) => ({
+		content: a.content,
+		filename: a.filename,
+		type: a.contentType,
+		disposition: "attachment" as const,
+	}));
+
 	try {
 		await sendEmail(env.EMAIL, {
 			to: params.to,
 			from: mailboxId,
 			subject: params.subject,
 			html: sanitizedBody,
+			...(text ? { text } : {}),
+			...(cc.length ? { cc } : {}),
+			...(bcc.length ? { bcc } : {}),
+			...(outboundAttachments.length ? { attachments: outboundAttachments } : {}),
 		});
 	} catch (e) {
 		console.error("Email send failed:", (e as Error).message);
 		return { error: `Failed to send email: ${(e as Error).message}` };
+	}
+
+	// The message is out. Archive failures must not turn into an error: the caller would retry and double-send.
+	let attachmentData: StoredAttachment[] = [];
+	let warning: string | undefined;
+	if (outboundAttachments.length) {
+		try {
+			attachmentData = await storeAttachments(env.BUCKET, messageId, outboundAttachments);
+		} catch (e) {
+			console.error("Attachment archive failed:", (e as Error).message);
+			warning = "Sent, but the attachments could not be archived.";
+		}
 	}
 
 	await stub.createEmail(
@@ -574,9 +662,16 @@ export async function toolSendEmail(
 			email_references: null,
 			thread_id: messageId,
 			message_id: outgoingMessageId,
+			cc: cc.length ? cc.join(", ").toLowerCase() : null,
+			bcc: bcc.length ? bcc.join(", ").toLowerCase() : null,
 		},
-		[],
+		attachmentData,
 	);
 
-	return { status: "sent", messageId, message: `Email sent to ${params.to}` };
+	return {
+		status: "sent",
+		messageId,
+		message: `Email sent to ${params.to}`,
+		...(warning ? { warning } : {}),
+	};
 }

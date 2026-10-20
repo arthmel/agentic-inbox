@@ -4,7 +4,6 @@
 
 import type { Context } from "hono";
 import { sendEmail } from "../email-sender";
-import { storeAttachments } from "../lib/attachments";
 import type { EmailFull } from "../lib/schemas";
 import {
 	validateSender,
@@ -17,6 +16,7 @@ import {
 import { SendEmailRequestSchema } from "../lib/schemas";
 import { Folders } from "../../shared/folders";
 import type { MailboxContext } from "../lib/mailbox";
+import { archiveAfterSend, sentResponse } from "./send";
 
 type AppContext = Context<MailboxContext>;
 type RateLimitStub = { checkSendRateLimit: () => Promise<string | null> };
@@ -53,42 +53,10 @@ export async function handleReplyEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
-
-	await stub.createEmail(
-		Folders.SENT,
-		{
-			id: messageId,
-			subject,
-			sender: fromEmail,
-			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
-			body: html || text || "",
-			in_reply_to: originalMsgId,
-			email_references: JSON.stringify(references),
-			thread_id: thread_id,
-			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-				...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
-				...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
-			]),
-		},
-		attachmentData,
-	);
-
-	await stub.markThreadRead(thread_id);
-
-	c.executionCtx.waitUntil(
-		sendEmail(c.env.EMAIL, {
+	// Send first, store second: the hourly/daily rate limit counts Sent rows,
+	// so a failed delivery must leave no Sent row behind.
+	try {
+		await sendEmail(c.env.EMAIL, {
 			to,
 			cc,
 			bcc,
@@ -104,12 +72,46 @@ export async function handleReplyEmail(c: AppContext) {
 				contentId: att.contentId,
 			})),
 			headers: buildThreadingHeaders(originalMsgId, references),
-		}).catch((e) => {
-			console.error("Deferred reply delivery failed:", (e as Error).message);
-		}),
-	);
+		});
+	} catch (e) {
+		return c.json({ error: `Failed to send reply: ${(e as Error).message}` }, 502);
+	}
 
-	return c.json({ id: messageId, status: "sent" }, 202);
+	const archived = await archiveAfterSend(c.env.BUCKET, messageId, attachments, async (attachmentData) => {
+		await stub.createEmail(
+			Folders.SENT,
+			{
+				id: messageId,
+				subject,
+				sender: fromEmail,
+				recipient: toStr,
+				cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
+				bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
+				date: new Date().toISOString(),
+				body: html || text || "",
+				in_reply_to: originalMsgId,
+				email_references: JSON.stringify(references),
+				thread_id: thread_id,
+				message_id: outgoingMessageId,
+				raw_headers: JSON.stringify([
+					{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+					{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+					...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+					...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+					{ key: "subject", value: subject },
+					{ key: "date", value: new Date().toISOString() },
+					{ key: "message-id", value: `<${outgoingMessageId}>` },
+					...(originalMsgId ? [{ key: "in-reply-to", value: `<${originalMsgId}>` }] : []),
+					...(references.length > 0 ? [{ key: "references", value: references.map((r: string) => `<${r}>`).join(" ") }] : []),
+				]),
+			},
+			attachmentData,
+		);
+
+		await stub.markThreadRead(thread_id);
+	});
+
+	return c.json(sentResponse(messageId, archived), 202);
 }
 
 export async function handleForwardEmail(c: AppContext) {
@@ -143,38 +145,10 @@ export async function handleForwardEmail(c: AppContext) {
 		return c.json({ error: rateLimitError }, 429);
 	}
 
-	const attachmentData = await storeAttachments(c.env.BUCKET, messageId, attachments);
-
-	await stub.createEmail(
-		Folders.SENT,
-		{
-			id: messageId,
-			subject,
-			sender: fromEmail,
-			recipient: toStr,
-			cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
-			bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
-			date: new Date().toISOString(),
-			body: html || text || "",
-			in_reply_to: null,
-			email_references: null,
-			thread_id: messageId,
-			message_id: outgoingMessageId,
-			raw_headers: JSON.stringify([
-				{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
-				{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
-				...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
-				...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
-				{ key: "subject", value: subject },
-				{ key: "date", value: new Date().toISOString() },
-				{ key: "message-id", value: `<${outgoingMessageId}>` },
-			]),
-		},
-		attachmentData,
-	);
-
-	c.executionCtx.waitUntil(
-		sendEmail(c.env.EMAIL, {
+	// Send first, store second: the hourly/daily rate limit counts Sent rows,
+	// so a failed delivery must leave no Sent row behind.
+	try {
+		await sendEmail(c.env.EMAIL, {
 			to,
 			cc,
 			bcc,
@@ -189,10 +163,40 @@ export async function handleForwardEmail(c: AppContext) {
 				disposition: att.disposition,
 				contentId: att.contentId,
 			})),
-		}).catch((e) => {
-			console.error("Deferred forward delivery failed:", (e as Error).message);
-		}),
+		});
+	} catch (e) {
+		return c.json({ error: `Failed to forward email: ${(e as Error).message}` }, 502);
+	}
+
+	const archived = await archiveAfterSend(c.env.BUCKET, messageId, attachments, (attachmentData) =>
+		stub.createEmail(
+			Folders.SENT,
+			{
+				id: messageId,
+				subject,
+				sender: fromEmail,
+				recipient: toStr,
+				cc: cc ? (Array.isArray(cc) ? cc.join(", ") : cc).toLowerCase() : null,
+				bcc: bcc ? (Array.isArray(bcc) ? bcc.join(", ") : bcc).toLowerCase() : null,
+				date: new Date().toISOString(),
+				body: html || text || "",
+				in_reply_to: null,
+				email_references: null,
+				thread_id: messageId,
+				message_id: outgoingMessageId,
+				raw_headers: JSON.stringify([
+					{ key: "from", value: typeof from === "string" ? from : `${from.name} <${from.email}>` },
+					{ key: "to", value: Array.isArray(to) ? to.join(", ") : to },
+					...(cc ? [{ key: "cc", value: Array.isArray(cc) ? cc.join(", ") : cc }] : []),
+					...(bcc ? [{ key: "bcc", value: Array.isArray(bcc) ? bcc.join(", ") : bcc }] : []),
+					{ key: "subject", value: subject },
+					{ key: "date", value: new Date().toISOString() },
+					{ key: "message-id", value: `<${outgoingMessageId}>` },
+				]),
+			},
+			attachmentData,
+		),
 	);
 
-	return c.json({ id: messageId, status: "sent" }, 202);
+	return c.json(sentResponse(messageId, archived), 202);
 }
