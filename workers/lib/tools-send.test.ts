@@ -387,9 +387,13 @@ describe("AC1: send_email with cc/bcc, text and one PDF attachment", () => {
 		assert.deepEqual(sent.cc, ["a@x.org", "b@x.org"]);
 		assert.deepEqual(sent.bcc, ["c@x.org"]);
 		assert.equal(sent.text, "See the attached report.");
-		assert.deepEqual(sent.attachments, [
-			{ content: PDF_B64, filename: "report.pdf", type: "application/pdf", disposition: "attachment" },
-		]);
+		const sentAtt = (sent.attachments as Array<Record<string, unknown>>)[0];
+		assert.ok(sentAtt.content instanceof Uint8Array, "binding must receive bytes, not a base64 string");
+		assert.ok(Buffer.from(sentAtt.content as Uint8Array).equals(PDF));
+		assert.deepEqual(
+			{ ...sentAtt, content: undefined },
+			{ content: undefined, filename: "report.pdf", type: "application/pdf", disposition: "attachment" },
+		);
 		assert.equal(state.puts.length, 1);
 		assert.ok(state.puts[0].key.startsWith(`attachments/${res.messageId}/`));
 		assert.ok(state.puts[0].key.endsWith("/report.pdf"));
@@ -521,7 +525,9 @@ describe("AC2b: recipient, base64, content-type and filename rules", () => {
 			attachments: [{ filename: "a.pdf", contentType: "application/pdf", contentBase64: "QUJD\nREVG" }],
 		});
 		assert.equal(res.status, "sent");
-		assert.equal((state.sends[0].attachments as Array<{ content: string }>)[0].content, "QUJDREVG");
+		const content = (state.sends[0].attachments as Array<{ content: unknown }>)[0].content;
+		assert.ok(content instanceof Uint8Array, "binding must receive bytes, not a base64 string");
+		assert.ok(Buffer.from(content as Uint8Array).equals(Buffer.from("ABCDEF")));
 	});
 
 	test("invalid content type (CRLF header injection) refused, nothing sent", async () => {

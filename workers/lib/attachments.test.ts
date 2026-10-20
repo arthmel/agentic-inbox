@@ -3,7 +3,36 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizeAttachmentFilename } from "./attachments.ts";
+import { sanitizeAttachmentFilename, base64ToBytes } from "./attachments.ts";
+
+describe("base64ToBytes", () => {
+	const cases: Array<[string, string, number[]]> = [
+		["valid, no padding", "QUJD", [0x41, 0x42, 0x43]],
+		["valid, whitespace stripped", "QUJD\nREVG", [0x41, 0x42, 0x43, 0x44, 0x45, 0x46]],
+		["padding 1 (=)", "QUI=", [0x41, 0x42]],
+		["padding 2 (==)", "QQ==", [0x41]],
+		["empty string", "", []],
+	];
+	for (const [name, input, expected] of cases) {
+		test(`decodes: ${name}`, () => {
+			assert.deepEqual(Array.from(base64ToBytes(input)), expected);
+		});
+	}
+
+	test("invalid character throws", () => {
+		assert.throws(() => base64ToBytes("QU!D"), /invalid base64/);
+	});
+
+	test("bad length (not a multiple of 4) throws", () => {
+		assert.throws(() => base64ToBytes("QUJDR"), /invalid base64/);
+	});
+
+	test("decodes every byte value 0-255 exactly", () => {
+		const all = Uint8Array.from({ length: 256 }, (_, i) => i);
+		const b64 = Buffer.from(all).toString("base64");
+		assert.deepEqual(base64ToBytes(b64), all);
+	});
+});
 
 describe("sanitizeAttachmentFilename", () => {
 	test("plain names are unchanged", () => {
