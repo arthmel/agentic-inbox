@@ -89,6 +89,10 @@ To go live: review a dry-run report, set `RETENTION_DRY_RUN` to `"false"` in `wr
 
 Any user who passes the shared Cloudflare Access policy can access all mailboxes in this app by design. This includes the MCP server at `/mcp` -- external AI tools (Claude Code, Cursor, etc.) connected via MCP can operate on any mailbox by passing a `mailboxId` parameter. There is no per-mailbox authorization; the Cloudflare Access policy is the single trust boundary.
 
+## Sending via MCP
+
+`send_email` and `send_reply` send the body exactly as given. Only agent artifacts are removed, deterministically and with no AI call: `<thinking>`/`<think>` and `<tool_call>`/`<function_call>` blocks, chat-template tokens such as `<|eot_id|>` and `[TOOL_CALLS]`, whole short (≤200 chars, no tables/lists/images/links) "As an AI language model…" lines or elements, and whole JSON tool-call lines, `<p>`/`<div>`/`<pre>` elements or ```` ```json ```` fences. The body is capped at 3.5 MB (final HTML, incl. the quoted reply). An empty body after cleanup is refused.
+
 ## Architecture
 
 ```

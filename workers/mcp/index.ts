@@ -206,7 +206,7 @@ export class EmailMCP extends McpAgent<Env> {
 					subject,
 					body: bodyHtml,
 					isPlainText: false,
-					runVerifyDraft: true,
+					bodyCleanup: "deterministic",
 				});
 				return mcpResult(result);
 			},
@@ -241,7 +241,7 @@ export class EmailMCP extends McpAgent<Env> {
 					subject,
 					body: bodyHtml,
 					isPlainText: false,
-					runVerifyDraft: true,
+					bodyCleanup: "deterministic",
 					in_reply_to,
 					thread_id,
 				});
@@ -313,7 +313,7 @@ export class EmailMCP extends McpAgent<Env> {
 		// ── send_reply ─────────────────────────────────────────────
 		this.server.tool(
 			"send_reply",
-			"Send a reply to an email. Only call after drafting and getting confirmation.",
+			"Send a reply to an email. Only call after drafting and getting confirmation. The body is sent as-is (only agent artifacts like <thinking> blocks are stripped); max 3.5 MB.",
 			{
 				mailboxId: z.string().describe("The mailbox email address to send from"),
 				originalEmailId: z
@@ -355,7 +355,7 @@ export class EmailMCP extends McpAgent<Env> {
 		// ── send_email ─────────────────────────────────────────────
 		this.server.tool(
 			"send_email",
-			"Send a new email (not a reply). Only call after getting confirmation.",
+			"Send a new email (not a reply). Only call after getting confirmation. The body is sent as-is (only agent artifacts like <thinking> blocks are stripped); max 3.5 MB.",
 			{
 				mailboxId: z.string().describe("The mailbox email address to send from"),
 				to: z.string().email().describe("Recipient email address"),
