@@ -27,6 +27,11 @@ import {
 	buildThreadingHeaders,
 } from "./email-helpers";
 import { verifyDraft } from "./ai";
+import {
+	cleanOutboundBody,
+	hasVisibleText,
+	MAX_OUTBOUND_HTML_BYTES,
+} from "./outbound-cleanup";
 import { sendEmail } from "../email-sender";
 import { Folders } from "../../shared/folders";
 import type { Env } from "../types";
@@ -42,6 +47,41 @@ type MailboxSearchStub = {
 type RateLimitStub = {
 	checkSendRateLimit: () => Promise<string | null>;
 };
+
+// ── Outbound body hygiene (MCP path, #5) ───────────────────────────
+
+/**
+ * MCP paths use deterministic artifact cleanup (no AI). The built-in
+ * EmailAgent keeps verifyDraft via `runVerifyDraft`.
+ */
+type BodyCleanup = "deterministic" | "ai";
+
+const EMPTY_SEND_ERROR =
+	"Email body is empty after removing agent artifacts — nothing sent.";
+const EMPTY_DRAFT_ERROR =
+	"Email body is empty after removing agent artifacts — draft not saved.";
+const EMPTY_UPDATE_ERROR =
+	"Email body is empty after removing agent artifacts — draft unchanged.";
+
+/** Deterministic artifact cleanup. Errors when no visible text is left. */
+function cleanOutboundOrError(
+	body: string,
+	emptyError: string,
+): { body: string } | { error: string } {
+	const { body: cleaned, removed } = cleanOutboundBody(body);
+	if (removed.length > 0) {
+		console.log("outbound-cleanup removed:", removed.join(","));
+	}
+	if (!hasVisibleText(cleaned)) return { error: emptyError };
+	return { body: cleaned };
+}
+
+/** Hard size cap on the final html (UTF-8 bytes). Null when within the cap. */
+function outboundSizeError(html: string): string | null {
+	const bytes = new TextEncoder().encode(html).length;
+	if (bytes <= MAX_OUTBOUND_HTML_BYTES) return null;
+	return `Email body is ${(bytes / 1_000_000).toFixed(2)} MB; the limit is 3.5 MB (Cloudflare caps a whole message at 5 MiB). Shorten it or split it.`;
+}
 
 // ── list_mailboxes ─────────────────────────────────────────────────
 
@@ -126,6 +166,8 @@ export async function toolDraftReply(
 		body: string;
 		isPlainText?: boolean;
 		runVerifyDraft?: boolean;
+		/** "deterministic" (MCP): artifact cleanup, no AI. Takes precedence over runVerifyDraft. */
+		bodyCleanup?: BodyCleanup;
 	},
 ): Promise<
 	| { status: "draft_saved"; draftId: string; message: string; draft: Record<string, string> }
@@ -135,7 +177,11 @@ export async function toolDraftReply(
 
 	// Verify/sanitize if requested
 	let processedBody = params.body.trim();
-	if (params.runVerifyDraft) {
+	if (params.bodyCleanup === "deterministic") {
+		const cleaned = cleanOutboundOrError(processedBody, EMPTY_DRAFT_ERROR);
+		if ("error" in cleaned) return cleaned;
+		processedBody = cleaned.body;
+	} else if (params.runVerifyDraft) {
 		const sanitized = await verifyDraft(env.AI, processedBody);
 		if (!sanitized) {
 			return { error: "Draft verification failed — body could not be verified. Please try again." };
@@ -204,6 +250,8 @@ export async function toolDraftEmail(
 		body: string;
 		isPlainText?: boolean;
 		runVerifyDraft?: boolean;
+		/** "deterministic" (MCP): artifact cleanup, no AI. Takes precedence over runVerifyDraft. */
+		bodyCleanup?: BodyCleanup;
 		/** Optional in_reply_to for create_draft style */
 		in_reply_to?: string;
 		/** Optional thread_id for create_draft style */
@@ -216,7 +264,11 @@ export async function toolDraftEmail(
 	const stub = getMailboxStub(env, mailboxId);
 
 	let processedBody = params.body.trim();
-	if (params.runVerifyDraft) {
+	if (params.bodyCleanup === "deterministic") {
+		const cleaned = cleanOutboundOrError(processedBody, EMPTY_DRAFT_ERROR);
+		if ("error" in cleaned) return cleaned;
+		processedBody = cleaned.body;
+	} else if (params.runVerifyDraft) {
 		const sanitized = await verifyDraft(env.AI, processedBody);
 		if (!sanitized) {
 			return { error: "Draft verification failed — body could not be verified. Please try again." };
@@ -291,14 +343,11 @@ export async function toolUpdateDraft(
 		return { error: "Draft not found" };
 	}
 
-	// Verify the body BEFORE deleting the old draft to prevent data loss
+	// Clean the body BEFORE deleting the old draft to prevent data loss
 	const newDraftId = crypto.randomUUID();
 	const rawBody = params.bodyHtml ?? oldDraft.body ?? "";
-	const verifiedBody = await verifyDraft(env.AI, rawBody);
-
-	if (!verifiedBody) {
-		return { error: "Draft verification failed — keeping existing draft unchanged. Please try again." };
-	}
+	const cleaned = cleanOutboundOrError(rawBody, EMPTY_UPDATE_ERROR);
+	if ("error" in cleaned) return cleaned;
 
 	await stub.deleteEmail(params.draftId);
 	await stub.createEmail(
@@ -309,7 +358,7 @@ export async function toolUpdateDraft(
 			sender: mailboxId.toLowerCase(),
 			recipient: (params.to ?? oldDraft.recipient).toLowerCase(),
 			date: new Date().toISOString(),
-			body: verifiedBody,
+			body: cleaned.body,
 			in_reply_to: oldDraft.in_reply_to || null,
 			email_references: oldDraft.email_references || null,
 			thread_id: oldDraft.thread_id || newDraftId,
@@ -405,12 +454,6 @@ export async function toolSendReply(
 > {
 	const stub = getMailboxStub(env, mailboxId);
 
-	// Check send rate limit
-	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
-	if (rateLimitError) {
-		return { error: rateLimitError };
-	}
-
 	const originalEmail = (await stub.getEmail(params.originalEmailId)) as EmailFull | null;
 	if (!originalEmail) {
 		return { error: "Original email not found" };
@@ -421,17 +464,24 @@ export async function toolSendReply(
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
 
-	// Verify and append quoted original message
-	const sanitizedBody = await verifyDraft(env.AI, params.bodyHtml);
-	if (!sanitizedBody) {
-		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
-	}
+	// Deterministic artifact cleanup of the caller's body only (no AI).
+	// The quoted original is appended unchanged.
+	const cleaned = cleanOutboundOrError(params.bodyHtml, EMPTY_SEND_ERROR);
+	if ("error" in cleaned) return cleaned;
 	const quotedBlock = buildQuotedReplyBlock({
 		date: originalEmail.date,
 		sender: originalEmail.sender || params.to,
 		body: originalEmail.body ?? undefined,
 	});
-	const fullBodyHtml = sanitizedBody + quotedBlock;
+	const fullBodyHtml = cleaned.body + quotedBlock;
+
+	// Size cap and rate limit come after validation: a rejected body must not burn quota.
+	const sizeError = outboundSizeError(fullBodyHtml);
+	if (sizeError) return { error: sizeError };
+	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
+	if (rateLimitError) {
+		return { error: rateLimitError };
+	}
 
 	try {
 		await sendEmail(env.EMAIL, {
@@ -483,7 +533,13 @@ export async function toolSendEmail(
 > {
 	const stub = getMailboxStub(env, mailboxId);
 
-	// Check send rate limit
+	const cleaned = cleanOutboundOrError(params.bodyHtml, EMPTY_SEND_ERROR);
+	if ("error" in cleaned) return cleaned;
+	const sanitizedBody = cleaned.body;
+
+	// Size cap and rate limit come after validation: a rejected body must not burn quota.
+	const sizeError = outboundSizeError(sanitizedBody);
+	if (sizeError) return { error: sizeError };
 	const rateLimitError = await (stub as unknown as RateLimitStub).checkSendRateLimit();
 	if (rateLimitError) {
 		return { error: rateLimitError };
@@ -492,11 +548,6 @@ export async function toolSendEmail(
 	const fromDomain = mailboxId.split("@")[1];
 	if (!fromDomain) throw new Error("Invalid mailbox email address");
 	const { messageId, outgoingMessageId } = generateMessageId(fromDomain);
-
-	const sanitizedBody = await verifyDraft(env.AI, params.bodyHtml);
-	if (!sanitizedBody) {
-		return { error: "Draft verification failed — refusing to send unverified content. Please try again." };
-	}
 
 	try {
 		await sendEmail(env.EMAIL, {
