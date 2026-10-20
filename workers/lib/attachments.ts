@@ -20,6 +20,21 @@ export interface StoredAttachment {
 
 const MAX_FILENAME_LENGTH = 200;
 
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Decode a base64 attachment (whitespace is ignored) to raw bytes.
+ * Throws a plain error on invalid base64; callers add the filename.
+ */
+export function base64ToBytes(b64: string): Uint8Array {
+	const content = b64.replace(/\s+/g, "");
+	if (!BASE64_RE.test(content) || content.length % 4 !== 0) {
+		throw new Error("invalid base64");
+	}
+	const binaryStr = atob(content);
+	return Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+}
+
 /**
  * Make an attachment filename safe for the outgoing MIME part and the R2 key.
  * Used for both what is sent and what is stored, so they always match.
@@ -58,8 +73,7 @@ export async function storeAttachments(
 		// Sanitize filename to prevent path traversal in R2 keys
 		const safeFilename = sanitizeAttachmentFilename(att.filename);
 		const key = `attachments/${emailId}/${attachmentId}/${safeFilename}`;
-		const binaryStr = atob(att.content);
-		const bytes = Uint8Array.from(binaryStr, (c) => c.charCodeAt(0));
+		const bytes = base64ToBytes(att.content);
 		await bucket.put(key, bytes);
 		results.push({
 			id: attachmentId,

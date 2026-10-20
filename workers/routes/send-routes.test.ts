@@ -145,7 +145,8 @@ for (const r of routes) {
 			assert.equal(sends[0].cc, "carol@example.org");
 			const atts = sends[0].attachments as Array<Record<string, unknown>>;
 			assert.equal(atts.length, 1);
-			assert.equal(atts[0].content, PDF_B64);
+			assert.ok(atts[0].content instanceof Uint8Array, "binding must receive bytes, not a base64 string");
+			assert.ok(Buffer.from(atts[0].content as Uint8Array).equals(Buffer.from(PDF_B64, "base64")));
 			assert.equal(atts[0].filename, "doc.pdf");
 			assert.equal(waitUntilCalls(), 0);
 		});
