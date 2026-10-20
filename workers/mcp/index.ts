@@ -355,20 +355,37 @@ export class EmailMCP extends McpAgent<Env> {
 		// ── send_email ─────────────────────────────────────────────
 		this.server.tool(
 			"send_email",
-			"Send a new email (not a reply). Only call after getting confirmation. The body is sent as-is (only agent artifacts like <thinking> blocks are stripped); max 3.5 MB.",
+			"Send a new email (not a reply). Only call after getting confirmation. The body is sent as-is (only agent artifacts like <thinking> blocks are stripped); max 3.5 MB. Optional cc/bcc and attachments (base64); max 50 recipients and 3.5 MB total incl. attachments.",
 			{
 				mailboxId: z.string().describe("The mailbox email address to send from"),
 				to: z.string().email().describe("Recipient email address"),
 				subject: z.string().describe("Subject line"),
 				bodyHtml: z.string().describe("The HTML body of the email"),
+				text: z.string().optional().describe("Optional plain-text alternative body"),
+				cc: z.array(z.string().email()).optional().describe("Optional CC recipient email addresses"),
+				bcc: z.array(z.string().email()).optional().describe("Optional BCC recipient email addresses"),
+				attachments: z
+					.array(
+						z.object({
+							filename: z.string().describe("Attachment file name, e.g. report.pdf"),
+							contentType: z.string().describe("MIME type, e.g. application/pdf"),
+							contentBase64: z.string().describe("File content, base64 encoded"),
+						}),
+					)
+					.optional()
+					.describe("Optional file attachments"),
 			},
-			async ({ mailboxId, to, subject, bodyHtml }) => {
+			async ({ mailboxId, to, subject, bodyHtml, text, cc, bcc, attachments }) => {
 				const denied = await verifyMailbox(mailboxId);
 				if (denied) return denied;
 				const result = await toolSendEmail(env, mailboxId, {
 					to,
 					subject,
 					bodyHtml,
+					text,
+					cc,
+					bcc,
+					attachments,
 				});
 				if ("error" in result) {
 					if (typeof result.error === "string" && result.error.startsWith("Failed to send")) {
