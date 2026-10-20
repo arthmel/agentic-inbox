@@ -18,10 +18,13 @@ function makeCtx(opts: {
 	log: Log;
 	body: Record<string, unknown>;
 	sendError?: Error;
+	bucketError?: Error;
+	createError?: Error;
 	rateLimitError?: string | null;
 	params?: Record<string, string>;
 }) {
 	const { log } = opts;
+	const created: Array<{ folder: string; atts: unknown[] }> = [];
 	const original = {
 		id: ORIGINAL_ID,
 		folder_id: "inbox",
@@ -44,6 +47,8 @@ function makeCtx(opts: {
 		},
 		createEmail: async (folder: string, email: Record<string, unknown>, atts?: unknown[]) => {
 			log.push("createEmail");
+			created.push({ folder, atts: atts ?? [] });
+			if (opts.createError) throw opts.createError;
 			return { folder, email, atts };
 		},
 		markThreadRead: async () => {
@@ -70,6 +75,7 @@ function makeCtx(opts: {
 			BUCKET: {
 				put: async (key: string) => {
 					log.push("bucket.put");
+					if (opts.bucketError) throw opts.bucketError;
 					return { key };
 				},
 			},
@@ -82,7 +88,7 @@ function makeCtx(opts: {
 		},
 		json: (body: unknown, status = 200) => ({ body, status }),
 	};
-	return { ctx: ctx as any, sends, waitUntilCalls: () => waitUntilCalls };
+	return { ctx: ctx as any, sends, created, waitUntilCalls: () => waitUntilCalls };
 }
 
 const sendBody = {
@@ -142,6 +148,37 @@ for (const r of routes) {
 			assert.equal(atts[0].content, PDF_B64);
 			assert.equal(atts[0].filename, "doc.pdf");
 			assert.equal(waitUntilCalls(), 0);
+		});
+
+		test("success body has no warning key", async () => {
+			const log: Log = [];
+			const { ctx } = makeCtx({ log, body: r.body, params: r.params });
+			const res = await r.handler(ctx);
+			assert.equal(res.status, 202);
+			assert.deepEqual(Object.keys(res.body).sort(), ["id", "status"]);
+		});
+
+		test("AC3b: archive (R2) failure after a successful send -> 202 sent + warning, Sent row kept with []", async () => {
+			const log: Log = [];
+			const { ctx, sends, created } = makeCtx({ log, body: r.body, params: r.params, bucketError: new Error("r2-down") });
+			const res = await r.handler(ctx);
+			assert.equal(res.status, 202);
+			assert.equal(res.body.status, "sent");
+			assert.equal(typeof res.body.id, "string");
+			assert.equal(res.body.warning, "Sent, but the copy could not be saved to Sent.");
+			assert.equal(sends.length, 1, "send called once");
+			assert.equal(created.length, 1, "createEmail called once");
+			assert.deepEqual(created[0].atts, [], "Sent row written with no attachments");
+		});
+
+		test("AC3b: Sent-row write failure after a successful send -> 202 sent + warning", async () => {
+			const log: Log = [];
+			const { ctx, sends } = makeCtx({ log, body: r.body, params: r.params, createError: new Error("db-down") });
+			const res = await r.handler(ctx);
+			assert.equal(res.status, 202);
+			assert.equal(res.body.status, "sent");
+			assert.equal(res.body.warning, "Sent, but the copy could not be saved to Sent.");
+			assert.equal(sends.length, 1, "send called once");
 		});
 
 		test("rate limited -> 429 and nothing sent", async () => {
