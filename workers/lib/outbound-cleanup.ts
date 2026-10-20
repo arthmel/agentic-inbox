@@ -48,6 +48,12 @@ const JSON_FENCE_RE = /```[ \t]*json[ \t]*\r?\n([\s\S]*?)```(?:\r?\n)?/gi;
 
 // 4. AI disclaimer: text must START with the phrase (word boundary keeps "AI-first", "AI company").
 const DISCLAIMER_RE = /^As an AI (?:language model|assistant|model)\b/i;
+// A disclaimer is only a disclaimer when it is short (s2, #5): longer text is content.
+const DISCLAIMER_MAX_CHARS = 200;
+// Markup that carries real content. An element holding any of these is never removed,
+// whatever its text says (a wrapper <div> around a report table is not a disclaimer).
+const NESTED_CONTENT_RE =
+	/<\/?(table|tr|td|th|ul|ol|li|p|div|pre|blockquote|h[1-6]|img|a|br|hr)\b/i;
 
 const TOOL_NAME_KEYS = ["name", "tool", "function"];
 const TOOL_ARG_KEYS = ["arguments", "parameters", "args", "input"];
@@ -81,7 +87,7 @@ function isToolJson(text: string): boolean {
 
 /** Classify the (already decoded, trimmed) text of a whole line/element. */
 function classifyText(text: string): ArtifactKind | null {
-	if (DISCLAIMER_RE.test(text)) return "ai_disclaimer";
+	if (DISCLAIMER_RE.test(text) && text.length <= DISCLAIMER_MAX_CHARS) return "ai_disclaimer";
 	if (isToolJson(text)) return "tool_json";
 	return null;
 }
@@ -106,6 +112,8 @@ function removeElements(s: string, note: (k: ArtifactKind) => void): string {
 			const text = decodeEntities(inner.replace(/<[^>]*>/g, " ")).trim();
 			const kind = classifyText(text);
 			if (!kind) return whole;
+			// Element carries real content (table, list, image, link, block...): keep it.
+			if (NESTED_CONTENT_RE.test(inner)) return whole;
 			changed = true;
 			note(kind);
 			return "";
@@ -172,6 +180,8 @@ export function cleanOutboundBody(body: string): { body: string; removed: string
  * stripping tags). Used to refuse sending an empty-after-cleanup body.
  */
 export function hasVisibleText(html: string): boolean {
+	// An image-only email is content, not an empty body.
+	if (/<img\b/i.test(html)) return true;
 	const text = decodeEntities(html.replace(/<[^>]*>/g, " "));
 	return /\S/.test(text);
 }

@@ -39,6 +39,19 @@ const REMOVAL_ROWS: Array<[string, string, string, string[]]> = [
 		["ai_disclaimer"],
 	],
 	["div disclaimer element", "<div>As an AI model here.</div>X", "X", ["ai_disclaimer"]],
+	[
+		"short p disclaimer, language model",
+		"<p>As an AI language model, I cannot browse the web.</p>X",
+		"X",
+		["ai_disclaimer"],
+	],
+	[
+		"short p disclaimer with inline em",
+		"<p><em>As an AI assistant</em>, I don't have opinions.</p>X",
+		"X",
+		["ai_disclaimer"],
+	],
+	["short plain disclaimer line", "As an AI model, I can't do that.\nX", "X", ["ai_disclaimer"]],
 	// 5. tool_json
 	[
 		"plain-text tool JSON line",
@@ -73,6 +86,21 @@ const KEEP_ROWS: Array<[string, string]> = [
 	["JSON array (not an object)", '[{"name":"a","arguments":{}}]'],
 	["config JSON in pre", '<pre>{"name":"db","port":1}</pre>'],
 	["unclosed thinking tag", "<thinking>never closed"],
+	// s2: an ai_disclaimer must be short and carry no content-bearing markup.
+	[
+		"wrapper div with a small table (element carries real content)",
+		"<div>As an AI assistant, here is your report:<br><table><tr><td>Revenue</td><td>120,000</td></tr></table></div>",
+	],
+	[
+		"p with a br carrying data",
+		"<p>As an AI assistant, I compiled this:<br>Revenue 120,000</p>",
+	],
+	[
+		"div disclaimer with a link",
+		'<div>As an AI model ... <a href="https://x.y">link</a></div>',
+	],
+	["250-char plain line starting with the phrase", "As an AI assistant, " + "x".repeat(230) + "\nNext"],
+	["nested short disclaimer inside a list item", "<ul><li>As an AI model, no.</li></ul>"],
 ];
 
 describe("cleanOutboundBody: artifact removal", () => {
@@ -123,6 +151,14 @@ describe("hasVisibleText", () => {
 
 	test("markup with text has visible text", () => {
 		assert.equal(hasVisibleText("<p>a</p>"), true);
+	});
+
+	test("an image-only body is visible content", () => {
+		assert.equal(hasVisibleText('<p><img src="cid:x"></p>'), true);
+	});
+
+	test("nbsp-only paragraph is still not visible", () => {
+		assert.equal(hasVisibleText("<p>&nbsp;</p>"), false);
 	});
 
 	test("cleanup of a body containing only an artifact leaves no visible text", () => {

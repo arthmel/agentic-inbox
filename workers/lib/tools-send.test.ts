@@ -329,3 +329,25 @@ describe("agent path guard: EmailAgent still uses verifyDraft", () => {
 		assert.equal(state.aiCalls, 1);
 	});
 });
+
+// s2: an ai_disclaimer wrapper div carrying a large table is real content, never removed.
+describe("s2: ai_disclaimer wrapper around a large table is sent byte-identical", () => {
+	test("send_email keeps <div>As an AI assistant…<table>…</table></div> whole, no AI", async () => {
+		let rows = "";
+		for (let i = 1; rows.length < 30_000; i++) {
+			rows += `<tr><td>Row ${i}</td><td>${(i * 41.5).toFixed(2)}</td><td>שורה ${i} &amp; more</td></tr>`;
+		}
+		const input = `<div>As an AI assistant, here is your report:<table border=1>${rows}</table></div>`;
+		const { env, state } = makeEnv();
+		const res: Res = await toolSendEmail(env, MAILBOX, {
+			to: "client@example.org",
+			subject: "Report",
+			bodyHtml: input,
+		});
+		assert.equal(res.status, "sent");
+		assert.equal(state.sends.length, 1);
+		assert.ok(sentOf(state) === input);
+		assert.equal(state.aiCalls, 0);
+	});
+});
+

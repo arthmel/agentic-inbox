@@ -91,7 +91,7 @@ Any user who passes the shared Cloudflare Access policy can access all mailboxes
 
 ## Sending via MCP
 
-`send_email` and `send_reply` send the body exactly as given. Only agent artifacts are removed, deterministically and with no AI call: `<thinking>`/`<think>` and `<tool_call>`/`<function_call>` blocks, chat-template tokens such as `<|eot_id|>` and `[TOOL_CALLS]`, whole "As an AI language model…" lines or elements, and whole JSON tool-call lines, `<p>`/`<div>`/`<pre>` elements or ```` ```json ```` fences. The body is capped at 3.5 MB (final HTML, incl. the quoted reply). An empty body after cleanup is refused.
+`send_email` and `send_reply` send the body exactly as given. Only agent artifacts are removed, deterministically and with no AI call: `<thinking>`/`<think>` and `<tool_call>`/`<function_call>` blocks, chat-template tokens such as `<|eot_id|>` and `[TOOL_CALLS]`, whole short (≤200 chars, no tables/lists/images/links) "As an AI language model…" lines or elements, and whole JSON tool-call lines, `<p>`/`<div>`/`<pre>` elements or ```` ```json ```` fences. The body is capped at 3.5 MB (final HTML, incl. the quoted reply). An empty body after cleanup is refused.
 
 ## Architecture
 
