@@ -2,7 +2,6 @@
 // Licensed under the Apache 2.0 license found in the LICENSE file or at:
 //     https://opensource.org/licenses/Apache-2.0
 
-import { routeAgentRequest } from "agents";
 import { Hono } from "hono";
 import { jwtVerify, createRemoteJWKSet } from "jose";
 import { createRequestHandler } from "react-router";
@@ -93,13 +92,6 @@ app.all("/mcp/*", async (c) => {
 
 // Mount the API routes
 app.route("/", apiApp);
-
-// Agent WebSocket routing - must be before React Router catch-all
-app.all("/agents/*", async (c) => {
-	const response = await routeAgentRequest(c.req.raw, c.env);
-	if (response) return response;
-	return c.text("Agent not found", 404);
-});
 
 // React Router catch-all: serves the SPA for all non-API routes
 app.all("*", (c) => {

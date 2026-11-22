@@ -21,7 +21,7 @@ type AppContext = Context<MailboxContext>;
 const CreateMailboxBody = z.object({
 	email: z.string().email(),
 	name: z.string().min(1),
-	settings: z.record(z.any()).optional(), // unvalidated — agentSystemPrompt goes straight to AI
+	settings: z.record(z.any()).optional(), // unvalidated, stored as-is
 });
 
 const DraftBody = z.object({
@@ -381,12 +381,6 @@ async function receiveEmail(event: ForwardableEmailMessage, env: Env, ctx: Execu
 			console.error(`Forwarding ${mailboxId} to ${forwardingEmail} failed:`, (e as Error).message);
 		}));
 	}
-
-	const agentStub = env.EMAIL_AGENT.get(env.EMAIL_AGENT.idFromName(mailboxId));
-	ctx.waitUntil(agentStub.fetch(new Request("https://agents/onNewEmail", {
-		method: "POST", headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ mailboxId, emailId: messageId, sender: (parsedEmail.from?.address || "").toLowerCase(), subject: parsedEmail.subject || "", threadId }),
-	})).catch((e) => console.error("Auto-draft trigger failed:", (e as Error).message)));
 }
 
 export { app, receiveEmail };
